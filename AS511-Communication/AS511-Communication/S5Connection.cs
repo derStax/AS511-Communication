@@ -8,7 +8,7 @@ using System.Text;
 /// Create a connection to a Siemens SPS S5 via AS511 Protocol.
 /// <para/>The AS511 communication gets imitated, reading and writing the DLE, ACK (...and more) commands manually.
 /// <para/>Please keep it mind, that this script only provides an imitated workaround, and to not rely on this for important machines.
-/// <para/>The Protocol-Structured got analyzed here: https://www.runmode.com/as511protocol_description.pdf
+/// <para/>The Protocol-Structured got analyzed here: https://www.runmode.com/as511protocol_description.pdf 
 /// </summary>
 public class S5Connection {
     private readonly SerialPort _port;
