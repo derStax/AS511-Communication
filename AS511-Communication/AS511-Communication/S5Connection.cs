@@ -13,6 +13,7 @@ using System.Text;
 public class S5Connection {
     private readonly SerialPort _port;
 
+    #region const bytes
     // the following Control-Character descriptions can be found on Wikipedia
     // https://de.wikipedia.org/wiki/Steuerzeichen 
     // https://en.wikipedia.org/wiki/Control_character 
@@ -32,7 +33,7 @@ public class S5Connection {
     private const byte DB_READ_CODE = 0x04;
     private const byte DB_WRITE_CODE = 0x03;
     private const byte BLOCK_INFO = 0x1A;
-    
+    #endregion
     
     /// <summary>
     /// Create the SerialPort connection. Needs to be connected afterward.
@@ -44,6 +45,7 @@ public class S5Connection {
         _port.ReadTimeout = 1000;
         _port.WriteTimeout = 1000;
     }
+    
     #region Helper
     public void Connect() => _port.Open();
     public void Disconnect() => _port.Close();
@@ -89,9 +91,11 @@ public class S5Connection {
     /// <param name="id">ID, of which kind of Block is meant (DB, SB, PB...)</param>
     /// <param name="nr">Block Nr (e.g. DB100 -> nr=100)</param>
     /// <param name="initialAddress">initial absolute address in PLC memory</param>
+    /// <param name="blockLength">length of the block</param>
     /// <param name="finalAddress">final absolute address in PLC memory (gets calculated by initialAddress + blockLength)</param>
-    public void Block_Information(byte id, byte nr, out byte[] initialAddress, out byte[] finalAddress) {
-        const string caller = nameof(Block_Information);
+    public void BlockInformation(byte id, byte nr, out byte[] initialAddress, out ushort blockLength,
+        out byte[] finalAddress) {
+        const string caller = nameof(BlockInformation);
 
         WriteSingle(STX, caller);
         ReadSingle(DLE, caller);
@@ -105,7 +109,7 @@ public class S5Connection {
         ReadSingle(ETX, caller);
         WriteSingle(DLE, caller);
         WriteSingle(ACK, caller);
-        
+
         // === Header Info ===
         WriteSingle(id, caller); // type (Datablock, Structured Block...)
         WriteSingle(nr, caller); // nr (0..255)
@@ -117,27 +121,26 @@ public class S5Connection {
         ReadSingle(STX, caller);
         WriteSingle(DLE, caller);
         WriteSingle(ACK, caller);
-        
+
         List<byte> buffer = new List<byte>();
-        while (true)
-        {
+        while (true) {
             int b = _port.ReadByte();
             buffer.Add((byte)b);
-            if (b == 0x03)  // ETX empfangen
+            if (b == 0x03) // ETX empfangen
                 break;
         }
-        
+
         // read initialAddress, calculate final address (initialAddress + blockLength)
         initialAddress = [buffer[1], buffer[2]];
-        byte[] blockLength = [buffer[11], buffer[12]];
+        byte[] blockLengthArr = [buffer[11], buffer[12]];
         var initial = (ushort)((initialAddress[0] << 8) | initialAddress[1]);
-        var length  = (ushort)((blockLength[0] << 8) | blockLength[1]);
-        var final = (ushort)(initial + length);
+        blockLength = (ushort)((blockLengthArr[0] << 8) | blockLengthArr[1]);
+        var final = (ushort)(initial + blockLength);
         finalAddress = [(byte)(final >> 8), (byte)(final & 0xFF)];
 
         WriteSingle(DLE, caller);
         WriteSingle(ACK, caller);
-        
+
         // === terminate === 
         ReadSingle(STX, caller);
         WriteSingle(DLE, caller);
@@ -153,11 +156,12 @@ public class S5Connection {
     /// Read information from PLC memory
     /// </summary>
     /// <param name="initialAddress">initial absolute address (read start address)</param>
+    /// <param name="blockLength">blockLength, checks if all memory already got read</param>
     /// <param name="finalAddress">final absolute address (read stop address)</param>
     /// <returns>byte array, of all the bytes that got read.</returns>
-    public byte[] Read(byte[] initialAddress, byte[] finalAddress) {
+    public byte[] Read(byte[] initialAddress, ushort blockLength, byte[] finalAddress) {
         const string caller = nameof(Read); // debug purposes
-        
+
         WriteSingle(STX, caller);
         ReadSingle(DLE, caller);
         ReadSingle(ACK, caller);
@@ -182,20 +186,29 @@ public class S5Connection {
         ReadSingle(STX, caller);
         WriteSingle(DLE, caller);
         WriteSingle(ACK, caller);
-        
-        //Console.WriteLine("\nREADING:");
+
         List<byte> buffer = new List<byte>();
-        while (true)
-        {
+        ushort curLength = 0;
+        while (true) {
+            curLength++;
             int b = _port.ReadByte();
             buffer.Add((byte)b);
-            if (b == 0x03)  // ETX empfangen - stop reading, start terminating handshake
-                break;
+
+            // ETX - stop reading, start terminating handshake
+            if (b == 0x03) {
+                // we will read 5 times 0x00 before reading the actual data
+                // at the end, we will read 0x10, 0x03
+                // therefore, we will read 7 Bytes more, then the actual data is long (blockLength)
+                // somehow, we need to increase block length by 8 instead of 7. I dont know why, but it seems to work :)
+                if (curLength == blockLength + 8) {
+                    break;
+                }
+            }
         }
-        
+
         WriteSingle(DLE, caller);
         WriteSingle(ACK, caller);
-        
+
         // === terminate === 
         ReadSingle(STX, caller);
         WriteSingle(DLE, caller);
