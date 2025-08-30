@@ -1,8 +1,7 @@
-namespace AS511_Communication;
-
-using System;
 using System.IO.Ports;
 using System.Text;
+
+namespace AS511_Communication;
 
 /// <summary>
 /// Create a connection to a Siemens SPS S5 via AS511 Protocol.
@@ -13,121 +12,108 @@ using System.Text;
 public class S5Connection {
     private readonly SerialPort _port;
 
-    #region const bytes
+    #region Byte Variables
+
     // the following Control-Character descriptions can be found on Wikipedia
     // https://de.wikipedia.org/wiki/Steuerzeichen 
     // https://en.wikipedia.org/wiki/Control_character 
     /// <summary>Start of Text</summary>
     private const byte STX = 0x02;
+
     /// <summary>End of Text</summary>
     private const byte ETX = 0x03;
+
     /// <summary>End of Transmission</summary>
     private const byte EOT = 0x04;
+
     /// <summary>Acknowledge</summary>
     private const byte ACK = 0x06;
+
     /// <summary>Data Link Escape</summary>
     private const byte DLE = 0x10;
+
     /// <summary>AG "end of transmission"</summary>
     private const byte AG_END = 0x12;
-    
+
     private const byte DB_READ_CODE = 0x04;
     private const byte DB_WRITE_CODE = 0x03;
     private const byte BLOCK_INFO = 0x1A;
+
     #endregion
-    
-    /// <summary>
-    /// Create the SerialPort connection. Needs to be connected afterward.
-    /// </summary>
+
+    /// <summary> Create the SerialPort connection. Needs to be connected afterward. </summary>
     /// <param name="portName">Port of the OS (in Windows mostly 'COM3')</param>
     public S5Connection(string portName) {
         _port = new SerialPort(portName, 9600, Parity.Even, 8, StopBits.One);
         _port.Encoding = Encoding.ASCII;
         _port.ReadTimeout = 1000;
         _port.WriteTimeout = 1000;
+        Connect();
     }
-    
-    #region Helper
-    public void Connect() => _port.Open();
-    public void Disconnect() => _port.Close();
-    /// <summary>
-    /// Writes a single Byte to the S5.
-    /// </summary>
-    /// <param name="b">Byte to Write</param>
-    /// <param name="callerName">Name of the Method, which called this (debug purposes)</param>
-    /// <param name="offset">(Optional) Offset of the SerialPort.Write command</param>
-    /// <param name="count">(Optional) Count of the SerialPort.Write command</param>
-    private void WriteSingle(byte b, string callerName, int offset = 0, int count = 1) {
-        try {
-            _port.Write([b], offset, count);
-        }
-        catch (Exception e) {
-            Console.WriteLine("Caller: " + callerName);
-            Console.WriteLine(e);
-        }
-    }
-    /// <summary>
-    /// Reads a single byte from the S5, and compares it to an expected byte
-    /// </summary>
-    /// <param name="expected">Expected Byte - if this doesn't match with the Byte that got read, there will be a message in the cconsole.</param>
-    /// <param name="callerName">Name of the Method, which called this (debug purposes)</param>
-    private void ReadSingle(byte expected, string callerName) {
-        try {
-            var read = _port.ReadByte();
-            if (read == expected)
-                return;
-            Console.WriteLine("Caller: " + callerName);
-            Console.WriteLine("Expected: " + expected + ", Received: " + read);
-        }
-        catch (Exception e) {
-            Console.WriteLine("Caller: " + callerName);
-            Console.WriteLine(e);
-        }
-    }
-    #endregion
-    
-    /// <summary>
-    /// Request Block information. If required, there is also a variable of the blockLength here. 
-    /// </summary>
+
+    /// <summary> Request Block information. If required, there is also a variable of the blockLength here. </summary>
     /// <param name="id">ID, of which kind of Block is meant (DB, SB, PB...)</param>
     /// <param name="nr">Block Nr (e.g. DB100 -> nr=100)</param>
     /// <param name="initialAddress">initial absolute address in PLC memory</param>
-    /// <param name="blockLength">length of the block</param>
+    /// <param name="blockLength">length of the block (how many words, each word = 2bytes)</param>
     /// <param name="finalAddress">final absolute address in PLC memory (gets calculated by initialAddress + blockLength)</param>
     public void BlockInformation(byte id, byte nr, out byte[] initialAddress, out ushort blockLength,
         out byte[] finalAddress) {
-        const string caller = nameof(BlockInformation);
-
-        WriteSingle(STX, caller);
-        ReadSingle(DLE, caller);
-        ReadSingle(ACK, caller);
-        WriteSingle(BLOCK_INFO, caller);
-        ReadSingle(STX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
-        ReadSingle(0x16, caller);
-        ReadSingle(DLE, caller);
-        ReadSingle(ETX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
+        WriteSingle(STX);
+        ReadSingle(DLE);
+        ReadSingle(ACK);
+        WriteSingle(BLOCK_INFO);
+        ReadSingle(STX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
+        ReadSingle(0x16);
+        ReadSingle(DLE);
+        ReadSingle(ETX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
 
         // === Header Info ===
-        WriteSingle(id, caller); // type (Datablock, Structured Block...)
-        WriteSingle(nr, caller); // nr (0..255)
-        WriteSingle(DLE, caller);
-        WriteSingle(EOT, caller);
-        ReadSingle(DLE, caller);
-        ReadSingle(ACK, caller);
+        WriteSingle(id); // type (Datablock, Structured Block...)
+        WriteSingle(nr); // nr (0..255)
+        WriteSingle(DLE);
+        WriteSingle(EOT);
+        ReadSingle(DLE);
+        ReadSingle(ACK);
         // === Data ===
-        ReadSingle(STX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
+        ReadSingle(STX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
 
-        List<byte> buffer = new List<byte>();
-        while (true) {
-            int b = _port.ReadByte();
-            buffer.Add((byte)b);
-            if (b == 0x03) // ETX empfangen
-                break;
+        List<byte> buffer = [];
+        // saves, if the previous read byte was a "double" DLE (data)byte. If so, and now another DLE comes, it must 
+        // be a "real" DLE, and therefore CANT be skipped!
+        var previousDoubleDle = false;
+        try {
+            while (true) {
+                int b = ReadSingle();
+                // if second DLE, skip this byte
+                if (b == 0x10) {
+                    if (buffer.Count > 1) {
+                        if (buffer[^1] == 0x10) {
+                            if (!previousDoubleDle) {
+                                previousDoubleDle = true;
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                previousDoubleDle = false;
+                buffer.Add((byte)b);
+
+                // 15 "real" databytes (including 0x00 in front and DLE ETX at end, excluding double DLE)
+                if (buffer.Count == 15)
+                    if (b == 0x03) // current ETX
+                        if (buffer[^2] == DLE) // previous DLE
+                            break;
+            }
+        } catch (Exception e) {
+            Console.WriteLine("Exception: " + e);
         }
 
         // read initialAddress, calculate final address (initialAddress + blockLength)
@@ -138,86 +124,100 @@ public class S5Connection {
         var final = (ushort)(initial + blockLength);
         finalAddress = [(byte)(final >> 8), (byte)(final & 0xFF)];
 
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
 
         // === terminate === 
-        ReadSingle(STX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
-        ReadSingle(AG_END, caller);
-        ReadSingle(DLE, caller);
-        ReadSingle(ETX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
+        ReadSingle(STX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
+        ReadSingle(AG_END);
+        ReadSingle(DLE);
+        ReadSingle(ETX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
     }
 
-    /// <summary>
-    /// Read information from PLC memory
-    /// </summary>
+    /// <summary> Read information from PLC memory </summary>
     /// <param name="initialAddress">initial absolute address (read start address)</param>
     /// <param name="blockLength">blockLength, checks if all memory already got read</param>
     /// <param name="finalAddress">final absolute address (read stop address)</param>
     /// <returns>byte array, of all the bytes that got read.</returns>
     public byte[] Read(byte[] initialAddress, ushort blockLength, byte[] finalAddress) {
-        const string caller = nameof(Read); // debug purposes
-
-        WriteSingle(STX, caller);
-        ReadSingle(DLE, caller);
-        ReadSingle(ACK, caller);
-        WriteSingle(DB_READ_CODE, caller);
-        ReadSingle(STX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
-        ReadSingle(0x16, caller);
-        ReadSingle(DLE, caller);
-        ReadSingle(ETX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
+        WriteSingle(STX);
+        ReadSingle(DLE);
+        ReadSingle(ACK);
+        WriteSingle(DB_READ_CODE);
+        ReadSingle(STX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
+        ReadSingle(0x16);
+        ReadSingle(DLE);
+        ReadSingle(ETX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
 
         // === header=== 
         _port.Write(initialAddress, 0, 2);
         _port.Write(finalAddress, 0, 2);
-        WriteSingle(DLE, caller);
-        WriteSingle(EOT, caller);
-        ReadSingle(DLE, caller);
-        ReadSingle(ACK, caller);
+        WriteSingle(DLE);
+        WriteSingle(EOT);
+        ReadSingle(DLE);
+        ReadSingle(ACK);
         // === data ===
-        ReadSingle(STX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
+        ReadSingle(STX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
 
         List<byte> buffer = new List<byte>();
-        ushort curLength = 0;
-        while (true) {
-            curLength++;
-            int b = _port.ReadByte();
-            buffer.Add((byte)b);
+        try {
+            ushort curLength = 0;
+            var previousDoubleDle = false;
+            while (true) {
+                int b = ReadSingle();
+                if (b == 0x10) {
+                    if (buffer.Count > 1) {
+                        if (buffer[^1] == 0x10) {
+                            if (!previousDoubleDle) {
+                                previousDoubleDle = true;
+                                continue;
+                            }
+                        }
+                    }
+                }
 
-            // ETX - stop reading, start terminating handshake
-            if (b == 0x03) {
+                previousDoubleDle = false;
+
+                curLength++;
+                buffer.Add((byte)b);
+
                 // we will read 5 times 0x00 before reading the actual data
                 // at the end, we will read 0x10, 0x03
                 // therefore, we will read 7 Bytes more, then the actual data is long (blockLength)
                 // somehow, we need to increase block length by 8 instead of 7. I dont know why, but it seems to work :)
                 if (curLength == blockLength + 8) {
-                    break;
+                    // ETX - stop reading, start terminating handshake
+                    if (b == 0x03) {
+                        break;
+                    }
                 }
             }
+        } catch (Exception e) {
+            Console.WriteLine("Exception: " + e);
         }
 
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
 
         // === terminate === 
-        ReadSingle(STX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
-        ReadSingle(AG_END, caller);
-        ReadSingle(DLE, caller);
-        ReadSingle(ETX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
+        ReadSingle(STX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
+        ReadSingle(AG_END);
+        ReadSingle(DLE);
+        ReadSingle(ETX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
 
         return buffer.ToArray();
     }
@@ -228,35 +228,92 @@ public class S5Connection {
     /// <param name="initialAddress">initial absolute address (write start address)</param>
     /// <param name="data">byte data, which will get written to the memory, beginning at initial address</param>
     public void Write(byte[] initialAddress, byte[] data) {
-        const string caller = nameof(Write);
-        
-        WriteSingle(STX, caller);
-        ReadSingle(DLE, caller);
-        ReadSingle(ACK, caller);
-        WriteSingle(DB_WRITE_CODE, caller);
-        ReadSingle(STX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
-        ReadSingle(0x16, caller);
-        ReadSingle(DLE, caller);
-        ReadSingle(ETX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
+        WriteSingle(STX);
+        ReadSingle(DLE);
+        ReadSingle(ACK);
+        WriteSingle(DB_WRITE_CODE);
+        ReadSingle(STX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
+        ReadSingle(0x16);
+        ReadSingle(DLE);
+        ReadSingle(ETX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
         // === header info ===
         _port.Write(initialAddress, 0, 2);
-        _port.Write(data, 0, data.Length);
-        WriteSingle(DLE, caller);
-        WriteSingle(EOT, caller);
-        ReadSingle(DLE, caller);
-        ReadSingle(ACK, caller);
+
+        // write double 0x10 to verify, that we want to use 0x10 instead of DLE
+        foreach (var b in data) {
+            _port.Write([b], 0, 1);
+            if (b == DLE) {
+                _port.Write([b], 0, 1);
+            }
+        }
+
+        //_port.Write(data, 0, data.Length);
+
+        WriteSingle(DLE);
+        WriteSingle(EOT);
+        ReadSingle(DLE);
+        ReadSingle(ACK);
         // === terminate ===
-        ReadSingle(STX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
-        ReadSingle(AG_END, caller);
-        ReadSingle(DLE, caller);
-        ReadSingle(ETX, caller);
-        WriteSingle(DLE, caller);
-        WriteSingle(ACK, caller);
+        ReadSingle(STX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
+        ReadSingle(AG_END);
+        ReadSingle(DLE);
+        ReadSingle(ETX);
+        WriteSingle(DLE);
+        WriteSingle(ACK);
     }
+
+    public void Flush() {
+        _port.DiscardInBuffer();
+        _port.DiscardOutBuffer();
+    }
+
+    #region Helper
+
+    private void Connect() => _port.Open();
+    public void Disconnect() => _port.Close();
+
+    /// <summary> Writes a single Byte to the S5. </summary>
+    /// <param name="b">Byte to Write</param>
+    /// <param name="offset">(Optional) Offset of the SerialPort.Write command</param>
+    /// <param name="count">(Optional) Count of the SerialPort.Write command</param>
+    private void WriteSingle(byte b, int offset = 0, int count = 1) {
+        try {
+            _port.Write([b], offset, count);
+        } catch (Exception e) {
+            Console.WriteLine("Exception: " + e);
+        }
+    }
+
+    /// <summary> Reads a single byte from the S5, and compares it to an expected byte </summary>
+    /// <param name="expected">Expected Byte - if this doesn't match with the Byte that got read, there will be a message in the console.</param>
+    private byte ReadSingle(byte expected) {
+        try {
+            var read = _port.ReadByte();
+            if (read == expected)
+                return (byte)read;
+            Console.WriteLine("Expected: " + expected + ", Received: " + read);
+        } catch (Exception e) {
+            Console.WriteLine("Exception: " + e);
+        }
+
+        return 0;
+    }
+
+    private byte ReadSingle() {
+        try {
+            var read = _port.ReadByte();
+            return (byte)read;
+        } catch (Exception e) {
+            Console.WriteLine("Exception: " + e);
+        }
+        return 0;
+    }
+
+    #endregion
 }
